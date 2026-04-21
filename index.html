@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Arabic Trace - Perfect Alignment</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: sans-serif; background: #222; -webkit-user-select: none; user-select: none; }
+        #toolbar {
+            position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+            background: rgba(255, 255, 255, 0.98); padding: 8px;
+            display: flex; flex-direction: column; gap: 8px; box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+        }
+        .tool-row { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; }
+        input[type="text"] { padding: 8px; border: 1.5px solid #bbb; border-radius: 6px; width: 150px; text-align: right; font-size: 16px; font-weight: bold; }
+        .color-btn { width: 28px; height: 28px; border-radius: 50%; border: 2px solid white; cursor: pointer; }
+        button { padding: 8px 15px; font-size: 14px; border: none; border-radius: 6px; background: #0077ff; color: white; cursor: pointer; font-weight: bold; }
+        #modeBtn { background: #28a745; min-width: 90px; }
+        #modeBtn.locked { background: #dc3545; }
+        #bottom-controls {
+            position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
+            background: rgba(255, 255, 255, 0.9); padding: 8px;
+            display: flex; align-items: center; justify-content: center; gap: 12px;
+        }
+        #viewport { width: 100vw; height: 100vh; overflow: hidden; background: #444; position: relative; }
+        #content-layer {
+            position: absolute; width: 5000px; height: 5000px; background: white; 
+            top: 50%; left: 50%; margin-top: -2500px; margin-left: -2500px;
+        }
+        #trace-text {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 380px; color: #f2f2f2; pointer-events: none; z-index: 1; font-family: serif;
+        }
+        #board { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; touch-action: none; }
+        
+        #pencil-hand {
+            position: absolute;
+            pointer-events: none;
+            z-index: 1000;
+            display: none;
+            /* ചിത്രത്തിന്റെ മുന കൃത്യമായി വരാൻ transform-origin ആവശ്യമാണ് */
+            transform-origin: 0 0;
+        }
+    </style>
+</head>
+<body>
+
+<div id="toolbar">
+    <div class="tool-row">
+        <input type="text" id="arabicInput" placeholder="അറബി ടൈപ്പ് ചെയ്യുക" oninput="updateTraceText()">
+        <button onclick="resetToCenter()">Reset View</button>
+        <button id="modeBtn" onclick="toggleMode()">Pen Mode</button>
+    </div>
+    <div class="tool-row">
+        <div class="color-btn" style="background: black;" onclick="setColor('black')"></div>
+        <div class="color-btn" style="background: red;" onclick="setColor('red')"></div>
+        <div class="color-btn" style="background: blue;" onclick="setColor('blue')"></div>
+        <input type="color" oninput="setColor(this.value)" style="width:30px; height:30px; border:none; background:transparent;">
+        <button onclick="undo()">Undo</button>
+        <button onclick="clearBoard()" style="background:#f44336;">Clear</button>
+    </div>
+    <div class="tool-row">
+        <button onclick="playAnimation()" style="background:#9c27b0">Preview Animation</button>
+        <button onclick="downloadSVG()" style="background:#009688">Save SVG</button>
+    </div>
+</div>
+
+<div id="bottom-controls">
+    <span style="font-size:12px; font-weight:bold;">Zoom:</span>
+    <input type="range" id="zoomSlider" min="0.5" max="3" step="0.1" value="1" oninput="updateZoom(this.value)">
+    <span style="font-size:12px; font-weight:bold;">Pen Size:</span>
+    <input type="range" id="penWidth" min="2" max="60" value="12">
+</div>
+
+<div id="viewport">
+    <div id="content-layer">
+        <div id="trace-text"></div>
+        <svg id="board" xmlns="http://www.w3.org/2000/svg" width="5000" height="5000"></svg>
+        <img id="pencil-hand" src="hand.png" width="200" height="200" />
+    </div>
+</div>
+
+<script>
+    const svg = document.getElementById("board");
+    const contentLayer = document.getElementById("content-layer");
+    const traceTextDiv = document.getElementById("trace-text");
+    const modeBtn = document.getElementById("modeBtn");
+    const penWidthInput = document.getElementById("penWidth");
+    const zoomSlider = document.getElementById("zoomSlider");
+    const pencilHand = document.getElementById("pencil-hand");
+
+    let scale = 1, posX = 0, posY = 0, isMoveMode = false, drawing = false;
+    let strokes = [], currentPath = null, currentColor = "black", evCache = [], prevDiff = -1;
+
+    function toggleMode() {
+        isMoveMode = !isMoveMode;
+        modeBtn.innerText = isMoveMode ? "Move Mode" : "Pen Mode";
+        modeBtn.style.background = isMoveMode ? "#dc3545" : "#28a745";
+    }
+
+    function setColor(color) { currentColor = color; }
+    function resetToCenter() { scale = 1; posX = 0; posY = 0; zoomSlider.value = 1; applyTransform(); }
+    function applyTransform() { contentLayer.style.transform = `translate(${posX}px, ${posY}px) scale(${scale})`; }
+    function updateTraceText() { traceTextDiv.innerText = document.getElementById("arabicInput").value; }
+    function updateZoom(v) { scale = parseFloat(v); applyTransform(); }
+
+    function getCoords(e) {
+        const rect = contentLayer.getBoundingClientRect();
+        return { x: (e.clientX - rect.left) / scale, y: (e.clientY - rect.top) / scale };
+    }
+
+    svg.onpointerdown = (e) => {
+        evCache.push(e);
+        if (isMoveMode) { this.lastX = e.clientX; this.lastY = e.clientY; drawing = true; }
+        else if (e.buttons === 1) {
+            drawing = true;
+            const c = getCoords(e);
+            currentPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            currentPath.setAttribute("d", `M ${c.x} ${c.y}`);
+            currentPath.setAttribute("stroke", currentColor);
+            currentPath.setAttribute("stroke-width", penWidthInput.value / scale);
+            currentPath.setAttribute("fill", "none");
+            currentPath.setAttribute("stroke-linecap", "round");
+            currentPath.setAttribute("stroke-linejoin", "round");
+            svg.appendChild(currentPath);
+            strokes.push(currentPath);
+        }
+    };
+
+    svg.onpointermove = (e) => {
+        for (let i = 0; i < evCache.length; i++) { if (e.pointerId === evCache[i].pointerId) { evCache[i] = e; break; } }
+        if (drawing) {
+            if (isMoveMode) {
+                if (evCache.length === 2) {
+                    let curDiff = Math.hypot(evCache[0].clientX - evCache[1].clientX, evCache[0].clientY - evCache[1].clientY);
+                    if (prevDiff > 0) { scale *= (curDiff / prevDiff); zoomSlider.value = scale; applyTransform(); }
+                    prevDiff = curDiff;
+                } else {
+                    posX += (e.clientX - this.lastX); posY += (e.clientY - this.lastY);
+                    this.lastX = e.clientX; this.lastY = e.clientY; applyTransform();
+                }
+            } else {
+                const c = getCoords(e);
+                currentPath.setAttribute("d", currentPath.getAttribute("d") + ` L ${c.x} ${c.y}`);
+            }
+        }
+    };
+
+    svg.onpointerup = svg.onpointerleave = (e) => {
+        drawing = false;
+        evCache = evCache.filter(ev => ev.pointerId !== e.pointerId);
+        if (evCache.length < 2) prevDiff = -1;
+    };
+
+    async function playAnimation() {
+        if (strokes.length === 0) return;
+
+        // Reset strokes
+        strokes.forEach(s => {
+            let len = s.getTotalLength();
+            s.style.strokeDasharray = len;
+            s.style.strokeDashoffset = len;
+            s.style.transition = "none";
+        });
+
+        pencilHand.style.display = "block";
+
+        for (let s of strokes) {
+            let len = s.getTotalLength();
+            let duration = len / 100; 
+            
+            s.style.transition = `stroke-dashoffset ${duration}s linear`;
+            s.style.strokeDashoffset = "0";
+
+            await new Promise(resolve => {
+                let startTime = null;
+                function step(timestamp) {
+                    if (!startTime) startTime = timestamp;
+                    let progress = (timestamp - startTime) / (duration * 1000);
+                    if (progress > 1) progress = 1;
+
+                    let point = s.getPointAtLength(progress * len);
+                    
+                    // --- പേനയുടെ മുന അഡ്ജസ്റ്റ് ചെയ്യാനുള്ള വാല്യൂസ് ---
+                    // കൈയുടെ ചിത്രം (hand.png) വരുന്നത് മുകളിൽ ഇടതു വശത്താണെങ്കിൽ ഈ വാല്യൂസ് 0 ആയി ഇടാം.
+                    // മുന അല്പം താഴെയാണെങ്കിൽ offsetY കൂട്ടുക (ഉദാ: 5, 10, 20).
+                    let offsetX = 50; 
+                    let offsetY = 60; 
+
+                    pencilHand.style.left = `${point.x - offsetX}px`;
+                    pencilHand.style.top = `${point.y - offsetY}px`;
+
+                    if (progress < 1) {
+                        requestAnimationFrame(step);
+                    } else {
+                        resolve();
+                    }
+                }
+                requestAnimationFrame(step);
+            });
+        }
+        
+        setTimeout(() => { pencilHand.style.display = "none"; }, 500);
+    }
+
+    function undo() { if (strokes.length > 0) svg.removeChild(strokes.pop()); }
+    function clearBoard() { svg.innerHTML = ""; strokes = []; updateTraceText(); }
+
+    function downloadSVG() {
+        let name = prompt("File name:", "trace");
+        if (!name) return;
+        const bbox = svg.getBBox();
+        const clone = svg.cloneNode(true);
+        clone.setAttribute("viewBox", `${bbox.x-10} ${bbox.y-10} ${bbox.width+20} ${bbox.height+20}`);
+        const data = new XMLSerializer().serializeToString(clone);
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([data], {type: "image/svg+xml"}));
+        a.download = name + ".svg";
+        a.click();
+    }
+</script>
+</body>
+</html>
